@@ -18,7 +18,7 @@ If you click the eraser in the top bar, the eraser will toggle on/off for the cu
 
 ## Installation
 
-Download [separatebrusheraser.zip](http://github.com/Bliwi/krita-separate-brush-eraser/latest/download/separatebrusheraser.zip) and install by going to `Tools > Scripts > Import Python Plugin From File...` in Krita and selecting the zip file.
+Download [separatebrusheraser.zip](http://github.com/dninosores/Bliwi/krita-separate-brush-eraser/latest/download/separatebrusheraser.zip) and install by going to `Tools > Scripts > Import Python Plugin From File...` in Krita and selecting the zip file.
 
 If you're having issues, more information on plugin installation can be found [here](https://docs.krita.org/en/user_manual/python_scripting/install_custom_python_plugin.html).
 

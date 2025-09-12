@@ -1,6 +1,5 @@
 from krita import *
-from PyQt5.QtWidgets import QWidget, QAction, QComboBox,  QCheckBox, QVBoxLayout, QLineEdit, QPushButton, QLabel
-from PyQt5.QtCore import QSettings
+from PyQt5.QtWidgets import QWidget, QAction, QComboBox
 from functools import partial
 from pprint import pprint
 from .api_krita import Krita as KritaAPI
@@ -21,6 +20,7 @@ DEBUG = True
 def print_dbg(msg):
     if DEBUG:
         print(msg)
+        print("hello World!")
 
 class BrushSettings:
 
@@ -48,9 +48,6 @@ class BrushState:
 
 class SeparateBrushEraserExtension(Extension):
     brush_state = None
-    # In SeparateBrushEraserExtension class definition
-    settings = QSettings("ollyisonit", "SeparateBrushEraser")
-
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -61,14 +58,14 @@ class SeparateBrushEraserExtension(Extension):
     def eraser_active(self):
         return Application.action(KRITA_ERASE_ACTION).isChecked()
 
-    # Big thanks to AkiR for helping with this function
+    # Big thankts to AkiR for helping with this function!
     def set_brush_preset_combo_box(self, tag):
         app = Krita.instance()
         win = app.activeWindow()
         presets_docker = next((d for d in win.dockers() if d.objectName() == 'PresetDocker'), None)
         for combo_box in presets_docker.findChildren(QComboBox):
             if combo_box.parent().metaObject().className() == 'KisTagChooserWidget':
-                # print('Debug: ' + ', '.join(combo_box.itemText(i) for i in range(combo_box.count())))
+                print('Debug: ' + ', '.join(combo_box.itemText(i) for i in range(combo_box.count())))
                 combo_box.setCurrentText(tag)
                 return  # correct one found, break loop with return
 
@@ -106,13 +103,11 @@ class SeparateBrushEraserExtension(Extension):
         return self.apply_brush_state(self.get_current_brush_state())
 
     def activate_brush(self, switchTool=True):
-        link_brush_tag = self.settings.value("checkbox_state", False, type=bool)
-        brush_tag = self.settings.value("brush_dropdown", "")
-
         if not self.get_current_brush_state():
             return
-        if link_brush_tag:
-            self.set_brush_preset_combo_box(brush_tag)
+        print("Switching to brush mode")
+        # set_brush_preset_combo_box('Digital')
+        self.set_brush_preset_combo_box('Brushes')
         self.get_current_brush_state().eraser_on = False
         if switchTool:
             self.switch_to_brush()
@@ -120,14 +115,10 @@ class SeparateBrushEraserExtension(Extension):
         QTimer.singleShot(0, self.verify_eraser_state)
 
     def activate_eraser(self, switchTool=True):
-        link_brush_tag = self.settings.value("checkbox_state", False, type=bool)
-        eraser_tag = self.settings.value("eraser_dropdown", "")
-
         if not self.get_current_brush_state():
             return
-        # print("Switching to eraser mode")  # Added logging
-        if link_brush_tag:
-            self.set_brush_preset_combo_box(eraser_tag)
+        print("Switching to eraser mode")  # Added logging
+        self.set_brush_preset_combo_box('Erasers')
         self.get_current_brush_state().eraser_on = True
         if switchTool:
             self.switch_to_brush()
@@ -186,18 +177,7 @@ class SeparateBrushEraserExtension(Extension):
     def setup(self):
         pass
 
-    def open_settings_window(self):
-        self.settings_window = SettingsWindow()
-        self.settings_window.show()
-
     def createActions(self, window):
-        # Add this new action with the existing actions
-        settings_action = window.createAction(
-            "dninosores_brush_eraser_settings",
-            "Brush Eraser Settings",
-            MENU_LOCATION)
-        settings_action.triggered.connect(self.open_settings_window)
-        
         # actions should be:
         # Switch to brush / switch to eraser, which activate the brush tool
         # Activate brush / eraser, which switch without activating the brush tool
@@ -303,75 +283,3 @@ class IterHierarchy:
 
 
 Krita.instance().addExtension(SeparateBrushEraserExtension(Krita.instance()))
-
-# Add after imports, before other classes
-class SettingsWindow(QWidget):
-    
-    def read_brush_preset_combo_box(self):
-        app = Krita.instance()
-        win = app.activeWindow()
-        presets_docker = next((d for d in win.dockers() if d.objectName() == 'PresetDocker'), None)
-        for combo_box in presets_docker.findChildren(QComboBox):
-            if combo_box.parent().metaObject().className() == 'KisTagChooserWidget':
-                return [combo_box.itemText(i) for i in range(combo_box.count())]
-
-    def __init__(self):
-        super().__init__()
-        preset_tags = self.read_brush_preset_combo_box()
-        self.settings = QSettings("ollyisonit", "SeparateBrushEraser")
-        self.setWindowTitle("Separate Brush Eraser Settings")
-        # Removed setGeometry – we’ll let size policies handle layout
-        # self.setGeometry(100, 100, 300, 200)
-
-        main_layout = QVBoxLayout()
-
-        # Checkbox
-        self.checkbox = QCheckBox("Link a brush preset tag with the brush and eraser")
-        self.checkbox.setChecked(self.settings.value("checkbox_state", False, type=bool))
-        self.checkbox.stateChanged.connect(self.on_checkbox_state_changed)
-        main_layout.addWidget(self.checkbox)
-
-        # Brush section
-        brush_label = QLabel("Brush preset tag to link with brushes:")
-        self.brush_dropdown = QComboBox()
-        self.brush_dropdown.addItems(preset_tags)
-        saved_brush = self.settings.value("brush_dropdown", "")
-        if saved_brush and saved_brush in preset_tags:
-            self.brush_dropdown.setCurrentText(saved_brush)
-        self.brush_dropdown.currentTextChanged.connect(self.on_brush_changed)
-
-        # Apply fixed size policy
-        brush_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.brush_dropdown.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        main_layout.addWidget(brush_label)
-        main_layout.addWidget(self.brush_dropdown)
-
-        # Eraser section
-        eraser_label = QLabel("Brush preset tag to link with erasers:")
-        self.eraser_dropdown = QComboBox()
-        self.eraser_dropdown.addItems(preset_tags)
-        saved_eraser = self.settings.value("eraser_dropdown", "")
-        if saved_eraser and saved_eraser in preset_tags:
-            self.eraser_dropdown.setCurrentText(saved_eraser)
-        self.eraser_dropdown.currentTextChanged.connect(self.on_eraser_changed)
-
-        # Apply fixed size policy
-        eraser_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.eraser_dropdown.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        main_layout.addWidget(eraser_label)
-        main_layout.addWidget(self.eraser_dropdown)
-
-        # Set layout and let it autosize
-        self.setLayout(main_layout)
-        self.adjustSize()
-
-    def on_checkbox_state_changed(self, state):
-        self.settings.setValue("checkbox_state", bool(state))
-
-    def on_brush_changed(self, value):
-        self.settings.setValue("brush_dropdown", value)
-
-    def on_eraser_changed(self, value):
-        self.settings.setValue("eraser_dropdown", value)

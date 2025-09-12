@@ -1,9 +1,10 @@
-from krita import *
-from PyQt5.QtWidgets import QWidget, QAction, QComboBox,  QCheckBox, QVBoxLayout, QLineEdit, QPushButton, QLabel
-from PyQt5.QtCore import QSettings
+from krita import Krita, Extension  # type: ignore
+from PyQt5.QtWidgets import QToolBar, QToolButton, QMenu
+from PyQt5 import QtGui
+from PyQt5.QtCore import QTimer, QObject, QEvent, Qt
 from functools import partial
-from pprint import pprint
 from .api_krita import Krita as KritaAPI
+from .api_krita.enums import Tool
 
 KRITA_ERASE_ACTION = "erase_action"
 BRUSH_ACTION = "dninosores_activate_brush"
@@ -12,15 +13,22 @@ ERASE_ON_ACTION = "dninosores_eraser_on"
 ERASE_OFF_ACTION = "dninosores_eraser_off"
 ERASE_TOGGLE_ACTION = "dninosores_eraser_toggle"
 MENU_LOCATION = "tools/scripts"
+MENU_GROUP_NAME = "SeparateBrushEraser"
 BRUSH_MODE = "BRUSH"
 ERASER_MODE = "ERASER"
 
-DEBUG = True
+DEBUG = False
 
 
 def print_dbg(msg):
     if DEBUG:
         print(msg)
+
+
+def get_action(name: str):
+    """Wrapper for non-type-safe getting action from Krita instance."""
+    return Krita.instance().action(name)
+
 
 class BrushSettings:
 
@@ -42,39 +50,28 @@ class BrushSettings:
 class BrushState:
     # Store a brush state for each view
     eraser_on: bool = False
-    brush_settings: BrushSettings = None
-    eraser_settings: BrushSettings = None
+    brush_settings: BrushSettings | None = None
+    eraser_settings: BrushSettings | None = None
 
 
 class SeparateBrushEraserExtension(Extension):
     brush_state = None
-    # In SeparateBrushEraserExtension class definition
-    settings = QSettings("ollyisonit", "SeparateBrushEraser")
-
+    # Toggled on when the line tool is temporarily activated by modifier key
+    tmp_line_activation: bool = False
 
     def __init__(self, parent):
         super().__init__(parent)
+        self.filter = LineModifierFilter(self, Qt.Key.Key_Shift)
 
     def switch_to_brush(self):
-        Krita.instance().action("KritaShape/KisToolBrush").trigger()
+        KritaAPI.trigger_action("KritaShape/KisToolBrush")
 
     def eraser_active(self):
-        return Application.action(KRITA_ERASE_ACTION).isChecked()
-
-    # Big thanks to AkiR for helping with this function
-    def set_brush_preset_combo_box(self, tag):
-        app = Krita.instance()
-        win = app.activeWindow()
-        presets_docker = next((d for d in win.dockers() if d.objectName() == 'PresetDocker'), None)
-        for combo_box in presets_docker.findChildren(QComboBox):
-            if combo_box.parent().metaObject().className() == 'KisTagChooserWidget':
-                # print('Debug: ' + ', '.join(combo_box.itemText(i) for i in range(combo_box.count())))
-                combo_box.setCurrentText(tag)
-                return  # correct one found, break loop with return
+        return get_action(KRITA_ERASE_ACTION).isChecked()
 
     def get_current_brush_state(self):
-        if (not KritaAPI.get_active_view() or not Application.activeWindow().
-                activeView().currentBrushPreset()):
+        if (not KritaAPI.get_active_view() or not Krita.instance().
+                activeWindow().activeView().currentBrushPreset()):
             return None
         if self.brush_state:
             return self.brush_state
@@ -94,74 +91,68 @@ class SeparateBrushEraserExtension(Extension):
         current_settings = BrushSettings().loadSettings()
         # toggling the eraser on
         if state.eraser_on:
-            state.eraser_settings.applySettings()
+            if state.eraser_settings:
+                state.eraser_settings.applySettings()
             state.brush_settings = current_settings
         else:
             state.eraser_settings = current_settings
-            state.brush_settings.applySettings()
+            if state.brush_settings:
+                state.brush_settings.applySettings()
         self.verify_eraser_state()
         return state
 
     def apply_current_brush_state(self):
-        return self.apply_brush_state(self.get_current_brush_state())
+        state = self.get_current_brush_state()
+        if state:
+            return self.apply_brush_state(state)
 
     def activate_brush(self, switchTool=True):
-        link_brush_tag = self.settings.value("checkbox_state", False, type=bool)
-        brush_tag = self.settings.value("brush_dropdown", "")
-
         if not self.get_current_brush_state():
             return
-        if link_brush_tag:
-            self.set_brush_preset_combo_box(brush_tag)
-        self.get_current_brush_state().eraser_on = False
+        self.get_current_brush_state().eraser_on = False  # type: ignore
         if switchTool:
             self.switch_to_brush()
         self.apply_current_brush_state()
         QTimer.singleShot(0, self.verify_eraser_state)
 
     def activate_eraser(self, switchTool=True):
-        link_brush_tag = self.settings.value("checkbox_state", False, type=bool)
-        eraser_tag = self.settings.value("eraser_dropdown", "")
-
         if not self.get_current_brush_state():
             return
-        # print("Switching to eraser mode")  # Added logging
-        if link_brush_tag:
-            self.set_brush_preset_combo_box(eraser_tag)
-        self.get_current_brush_state().eraser_on = True
+        self.get_current_brush_state().eraser_on = True  # type: ignore
         if switchTool:
             self.switch_to_brush()
         self.apply_current_brush_state()
         QTimer.singleShot(0, self.verify_eraser_state)
 
     def on_brush_toggled(self, toggled):
-        if not self.get_current_brush_state():
+        current_brush_state = self.get_current_brush_state()
+        if not current_brush_state:
             return
         # Triggers when krita switches to/from the brush tool for any reason. Does not trigger if the brush tool is already selected.
         if toggled:
             pass
-        elif QApplication.queryKeyboardModifiers() & Qt.ShiftModifier:
+        # Don't switch eraser state if we're activating the line tool temporarily with modifier key
+        elif self.tmp_line_activation:
             pass
-            print("Keeping eraser on bc shift is down")
         else:
-            print("Turning off eraser bc shift is not down")
-            self.get_current_brush_state().eraser_on = False
+            current_brush_state.eraser_on = False
             self.apply_current_brush_state()
 
     def verify_eraser_state(self):
-        if self.get_current_brush_state():
-            desired_state = self.get_current_brush_state().eraser_on
+        current_brush_state = self.get_current_brush_state()
+        if current_brush_state:
+            desired_state = current_brush_state.eraser_on
             if desired_state != self.eraser_active():
-                Application.action(KRITA_ERASE_ACTION).trigger()
+                KritaAPI.trigger_action(KRITA_ERASE_ACTION)
 
     def on_eraser_action(self, toggled):
         pass
         # self.get_eraser_button().setChecked(self.eraser_active())
         # self.verify_eraser_state()
-        print("changed to the eraser")
 
     def classic_krita_eraser_toggle_auto(self):
-        self.classic_krita_eraser_toggle(not self.brush_state.eraser_on)
+        if self.brush_state:
+            self.classic_krita_eraser_toggle(not self.brush_state.eraser_on)
 
     def classic_krita_eraser_toggle(self, toggled):
         # self.verify_eraser_state()
@@ -172,52 +163,51 @@ class SeparateBrushEraserExtension(Extension):
             self.activate_brush(False)
 
     def on_eraser_button_clicked(self, toggled):
-        print(f"Clicked with value {toggled}")
+        # print(f"Clicked with value {toggled}")
         # Actually I think it would be better if this toggled like regular krita
         # i.e. swap the brush presets, then toggle eraser without switching tool
         # actually don't swap the brush presets but to toggle eraser without switching tool
         self.classic_krita_eraser_toggle(toggled)
 
     def on_eraser_button_toggled(self, toggled):
-        print(f"Button toggled with value {toggled}")
-        self.get_eraser_button().setChecked(self.eraser_active())
+        # print(f"Button toggled with value {toggled}")'
+        eraser_button = self.get_eraser_button()
+        if eraser_button:
+            eraser_button.setChecked(self.eraser_active())
         # self.verify_eraser_state()
 
     def setup(self):
         pass
 
-    def open_settings_window(self):
-        self.settings_window = SettingsWindow()
-        self.settings_window.show()
-
     def createActions(self, window):
-        # Add this new action with the existing actions
-        settings_action = window.createAction(
-            "dninosores_brush_eraser_settings",
-            "Brush Eraser Settings",
-            MENU_LOCATION)
-        settings_action.triggered.connect(self.open_settings_window)
-        
+
+        # menu = QMenu(MENU_GROUP_NAME, window.qwindow())
         # actions should be:
         # Switch to brush / switch to eraser, which activate the brush tool
         # Activate brush / eraser, which switch without activating the brush tool
         # Toggle, which toggles between the two options without switching the tool
         # A 'when you hold shift temporarily switch to the line tool without deactivating eraser' action
-        activate_brush_action = window.createAction(BRUSH_ACTION,
-                                                    "Switch to Brush",
-                                                    MENU_LOCATION)
-        activate_eraser_action = window.createAction(ERASE_ACTION,
-                                                     "Switch to Eraser",
-                                                     MENU_LOCATION)
-        enable_eraser_action = window.createAction(ERASE_ON_ACTION,
-                                                   "Activate Eraser",
-                                                   MENU_LOCATION)
-        disable_eraser_action = window.createAction(ERASE_OFF_ACTION,
-                                                    "Deactivate Eraser",
-                                                    MENU_LOCATION)
-        toggle_eraser_action = window.createAction(ERASE_TOGGLE_ACTION,
-                                                   "Toggle Eraser",
-                                                   MENU_LOCATION)
+        menu_action = window.createAction(
+            MENU_GROUP_NAME, MENU_GROUP_NAME,
+            MENU_LOCATION + "/" + MENU_GROUP_NAME)
+        menu = QMenu(MENU_GROUP_NAME, window.qwindow())
+        menu_action.setMenu(menu)
+        activate_brush_action = window.createAction(
+            BRUSH_ACTION, "Switch to Freehand Brush",
+            MENU_LOCATION + "/" + MENU_GROUP_NAME)
+        activate_eraser_action = window.createAction(
+            ERASE_ACTION, "Switch to Freehand Eraser",
+            MENU_LOCATION + "/" + MENU_GROUP_NAME)
+        enable_eraser_action = window.createAction(
+            ERASE_ON_ACTION, "Activate Eraser Preset for Current Tool",
+            MENU_LOCATION + "/" + MENU_GROUP_NAME)
+        disable_eraser_action = window.createAction(
+            ERASE_OFF_ACTION, "Activate Brush Preset for Current Tool",
+            MENU_LOCATION + "/" + MENU_GROUP_NAME)
+        toggle_eraser_action = window.createAction(
+            ERASE_TOGGLE_ACTION, "Toggle Eraser Preset for Current Tool",
+            MENU_LOCATION + "/" + MENU_GROUP_NAME)
+
         activate_brush_action.triggered.connect(
             partial(self.activate_brush, True))
         activate_eraser_action.triggered.connect(
@@ -229,32 +219,49 @@ class SeparateBrushEraserExtension(Extension):
         toggle_eraser_action.triggered.connect(
             self.classic_krita_eraser_toggle_auto)
 
+        appNotifier = KritaAPI.instance.notifier()
+        appNotifier.setActive(True)
+
+        def installLineModifierFilter(_view: QObject):
+            for item, level in IterHierarchy(
+                    KritaAPI.instance.activeWindow().qwindow()):
+                if item.metaObject().className() == "Viewport":
+                    print_dbg("Installing line modifier filter")
+                    item.removeEventFilter(self.filter)
+                    item.installEventFilter(self.filter)
+
+        appNotifier.viewCreated.connect(installLineModifierFilter)
+
         QTimer.singleShot(500, self.bind_brush_toggled)
 
-    def get_eraser_button(self):
-        qwin = Application.activeWindow().qwindow()
+    def get_eraser_button(self) -> QToolButton | None:
+        qwin = KritaAPI.get_active_qwindow()
         pobj = qwin.findChild(QToolBar, 'BrushesAndStuff')
         eraser_button = None
         for item, depth in IterHierarchy(pobj):
             try:
-                if item.defaultAction() == Application.action(
-                        KRITA_ERASE_ACTION):
+                if item.defaultAction() == get_action(KRITA_ERASE_ACTION):
                     eraser_button = item
-            except:
+            except Exception:
                 pass
         return eraser_button
 
     def print_state(self):
-        if self.get_current_brush_state():
-            desired_state = self.get_current_brush_state().eraser_on
+        current_brush_state = self.get_current_brush_state()
+        eraser_button = self.get_eraser_button()
+        if current_brush_state:
+            desired_state = current_brush_state.eraser_on
             print(f"Eraser should be {desired_state}")
-            print(f"Button checked is {self.get_eraser_button().isChecked()}")
+            if eraser_button:
+                print(f"Button checked is {eraser_button.isChecked()}")
+            else:
+                print("Eraser button not found!")
             print(f"Eraser action is {self.eraser_active()}")
             print("\n")
 
     def bind_brush_toggled(self):
         success = False
-        Application.action(KRITA_ERASE_ACTION).triggered.connect(
+        Krita.instance().action(KRITA_ERASE_ACTION).triggered.connect(
             self.on_eraser_action)
         for docker in Krita.instance().dockers():
             if docker.objectName() == "ToolBox":
@@ -268,13 +275,44 @@ class SeparateBrushEraserExtension(Extension):
                 "Binding eraser toggle to brush button failed. Try restarting Krita."
             )
         eraser_button = self.get_eraser_button()
-
-        eraser_button.toggled.connect(self.on_eraser_button_toggled)
-        eraser_button.clicked.connect(self.on_eraser_button_clicked)
-
-        timer = QTimer(Application.activeWindow().qwindow())
+        if eraser_button:
+            eraser_button.toggled.connect(self.on_eraser_button_toggled)
+            eraser_button.clicked.connect(self.on_eraser_button_clicked)
+        else:
+            print(
+                "Binding eraser toggle to erase button failed. Try restarting Krita."
+            )
+        timer = QTimer(KritaAPI.get_active_qwindow())
         timer.timeout.connect(self.verify_eraser_state)
         timer.start(1)
+
+
+class LineModifierFilter(QObject):
+    """EventFilter that listens for a certain modifier key and tells the extension to temporarily switch to the line tool when it the key is pressed."""
+    extension: SeparateBrushEraserExtension
+    modifier_key: int = Qt.Key.Key_Shift
+
+    def __init__(self, extension: SeparateBrushEraserExtension,
+                 modifier_key: int):
+        super().__init__()
+        self.extension = extension
+        self.modifier_key = modifier_key
+
+    def eventFilter(self, a0: QObject | None, a1: QEvent | None) -> bool:
+        event = a1
+        if event and isinstance(event, QtGui.QKeyEvent):
+            if KritaAPI.active_tool == Tool.FREEHAND_BRUSH and event.key(
+            ) == self.modifier_key and event.type() == QEvent.Type.KeyPress:
+                print_dbg("event filter activated")
+                self.extension.tmp_line_activation = True
+                KritaAPI.active_tool = Tool.LINE
+            if KritaAPI.active_tool == Tool.LINE and event.key(
+            ) == self.modifier_key and event.type() == QEvent.Type.KeyRelease:
+                print_dbg("event filter activated")
+                if self.extension.tmp_line_activation:
+                    KritaAPI.active_tool = Tool.FREEHAND_BRUSH
+                    self.extension.tmp_line_activation = False
+        return False
 
 
 class IterHierarchy:
@@ -303,75 +341,3 @@ class IterHierarchy:
 
 
 Krita.instance().addExtension(SeparateBrushEraserExtension(Krita.instance()))
-
-# Add after imports, before other classes
-class SettingsWindow(QWidget):
-    
-    def read_brush_preset_combo_box(self):
-        app = Krita.instance()
-        win = app.activeWindow()
-        presets_docker = next((d for d in win.dockers() if d.objectName() == 'PresetDocker'), None)
-        for combo_box in presets_docker.findChildren(QComboBox):
-            if combo_box.parent().metaObject().className() == 'KisTagChooserWidget':
-                return [combo_box.itemText(i) for i in range(combo_box.count())]
-
-    def __init__(self):
-        super().__init__()
-        preset_tags = self.read_brush_preset_combo_box()
-        self.settings = QSettings("ollyisonit", "SeparateBrushEraser")
-        self.setWindowTitle("Separate Brush Eraser Settings")
-        # Removed setGeometry – we’ll let size policies handle layout
-        # self.setGeometry(100, 100, 300, 200)
-
-        main_layout = QVBoxLayout()
-
-        # Checkbox
-        self.checkbox = QCheckBox("Link a brush preset tag with the brush and eraser")
-        self.checkbox.setChecked(self.settings.value("checkbox_state", False, type=bool))
-        self.checkbox.stateChanged.connect(self.on_checkbox_state_changed)
-        main_layout.addWidget(self.checkbox)
-
-        # Brush section
-        brush_label = QLabel("Brush preset tag to link with brushes:")
-        self.brush_dropdown = QComboBox()
-        self.brush_dropdown.addItems(preset_tags)
-        saved_brush = self.settings.value("brush_dropdown", "")
-        if saved_brush and saved_brush in preset_tags:
-            self.brush_dropdown.setCurrentText(saved_brush)
-        self.brush_dropdown.currentTextChanged.connect(self.on_brush_changed)
-
-        # Apply fixed size policy
-        brush_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.brush_dropdown.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        main_layout.addWidget(brush_label)
-        main_layout.addWidget(self.brush_dropdown)
-
-        # Eraser section
-        eraser_label = QLabel("Brush preset tag to link with erasers:")
-        self.eraser_dropdown = QComboBox()
-        self.eraser_dropdown.addItems(preset_tags)
-        saved_eraser = self.settings.value("eraser_dropdown", "")
-        if saved_eraser and saved_eraser in preset_tags:
-            self.eraser_dropdown.setCurrentText(saved_eraser)
-        self.eraser_dropdown.currentTextChanged.connect(self.on_eraser_changed)
-
-        # Apply fixed size policy
-        eraser_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.eraser_dropdown.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        main_layout.addWidget(eraser_label)
-        main_layout.addWidget(self.eraser_dropdown)
-
-        # Set layout and let it autosize
-        self.setLayout(main_layout)
-        self.adjustSize()
-
-    def on_checkbox_state_changed(self, state):
-        self.settings.setValue("checkbox_state", bool(state))
-
-    def on_brush_changed(self, value):
-        self.settings.setValue("brush_dropdown", value)
-
-    def on_eraser_changed(self, value):
-        self.settings.setValue("eraser_dropdown", value)
